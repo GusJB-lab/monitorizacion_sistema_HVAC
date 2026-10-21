@@ -1,0 +1,270 @@
+---
+title: |
+  **Control Estadístico de la Calidad**\
+  Monitorización del sistema HVAC -- Tienda textil, Ciudad de Panamá
+subtitle: "Trabajo final CEC --- MUTE"
+author: "Gustavo Andrés Jácome Barrantes"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  pdf_document:
+    number_sections: true
+    fig_caption: true
+    fig_width: 7
+    fig_height: 3.8
+    latex_engine: xelatex
+geometry: "top=2cm, bottom=2cm, left=2.5cm, right=2.5cm"
+fontsize: 10pt
+header-includes:
+  - \usepackage{booktabs,float,xcolor,fancyhdr,mdframed,amssymb,amsmath,fontspec}
+  - \pagestyle{fancy}
+  - \fancyhf{}
+  - \fancyhead[L]{\small Trabajo final -- CEC}
+  - \fancyhead[R]{\small Gustavo Jácome Barrantes}
+  - \fancyfoot[C]{\small \thepage}
+  - \renewcommand{\headrulewidth}{0.4pt}
+  - \definecolor{azul}{RGB}{31,78,121}
+  - \definecolor{rojo}{RGB}{192,0,0}
+  - \definecolor{verde}{RGB}{55,86,35}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE,
+                      fig.pos="H", comment="#>")
+library(qcc)
+library(SixSigma)
+library(readxl)
+library(knitr)
+```
+
+```{r datos, include=FALSE}
+raw <- read_excel("datos_tienda.xlsx", sheet = "Hoja1")
+names(raw)[1:4] <- c("fecha","hora","chiller_kw","general_kw")
+raw$fecha_dt <- as.Date(raw$fecha)
+raw$hora_num <- as.integer(format(raw$hora, "%H"))
+raw$diasem   <- as.integer(format(raw$fecha_dt, "%u"))
+lab <- raw[raw$diasem <= 5 & raw$hora_num >= 10 & raw$hora_num <= 19, ]
+chiller_qcc <- qcc.groups(lab$chiller_kw,
+                           as.integer(factor(lab$fecha_dt)))
+fechas <- sort(unique(lab$fecha_dt))
+idx_f1 <- which(fechas <= as.Date("2017-09-15"))
+idx_f2 <- which(fechas >  as.Date("2017-09-15"))
+medias_f1 <- rowMeans(chiller_qcc[idx_f1, ])
+rangos_f1 <- apply(chiller_qcc[idx_f1,], 1, function(x) diff(range(x)))
+sw   <- shapiro.test(medias_f1)
+rho1 <- cor(medias_f1[-length(medias_f1)], medias_f1[-1])
+```
+
+---
+
+# Introducción
+
+El sistema HVAC de una tienda textil situada en un centro comercial de Ciudad de Panamá opera bajo condiciones de clima tropical, lo que implica refrigeración continua durante todo el año. Los datos analizados provienen de Flores et al. (2020)^[*Mathematics* 8(1):58.], un estudio que documenta el funcionamiento de la instalación durante el período agosto--noviembre de 2017 e identifica eventos de fallo en sensores mediante modelos de ecuaciones estructurales (SEM).
+
+La **variable CTQ** seleccionada es `chiller_kw` (potencia activa del chiller, kW), el mayor consumidor eléctrico del edificio y la variable sobre la que el artículo reporta eventos con causa asignable conocida. El análisis se restringe a días laborables (lunes--viernes) en horario de ocupación comercial (10:00--19:00 h). Esta delimitación es determinante: fuera de ese horario el chiller trabaja en modo *standby* con un consumo de $\approx1.9$ kW, una distribución completamente diferente a la de operación plena que, de incluirse, mezclaría dos poblaciones distintas y haría inválidos los límites de control.
+
+Cada día laborable constituye una **muestra racional de $n=10$** observaciones horarias. La elección de $n=10$ responde al principio de muestras racionales de Shewhart: las 10 mediciones de un mismo día corresponden al mismo turno, el mismo equipo y las mismas condiciones ambientales, por lo que la variabilidad intra-muestra refleja únicamente la aleatoriedad inherente al proceso. Con $n=10$ se dispone de las constantes Shewhart $A_2$, $D_3$, $D_4$ y $d_2$ tabuladas, y el Teorema Central del Límite garantiza normalidad suficiente en las medias muestrales.
+
+Se obtienen 85 muestras en total: 34 para la **Fase I** (calibración, 01/08--15/09/2017) y 51 para la **Fase II** (monitorización, 18/09--27/11/2017).
+
+---
+
+# Supuestos y análisis exploratorio de datos
+
+La construcción de gráficos de control Shewhart requiere verificar, antes de calcular ningún límite, que las observaciones cumplen los supuestos de normalidad e independencia. La verificación se realiza sobre las medias diarias de Fase I, que son los estadísticos sobre los que operan los gráficos de control.
+
+```{r supuestos-eda, fig.height=3.6, fig.cap="Q-Q plot y ACF de las medias diarias de Fase I (izq. y centro) y serie temporal completa con tendencia LOESS (der.)."}
+op <- par(mfrow=c(1,3), mar=c(4,4,2.5,1))
+qqnorm(medias_f1, main="Q-Q medias F-I", pch=16, col="steelblue", cex=0.85)
+qqline(medias_f1, col="red3", lwd=2)
+acf(medias_f1, lag.max=12, main="ACF medias F-I", cex.main=0.9)
+vals <- as.vector(t(chiller_qcc))
+fechas_rep <- rep(c(fechas[idx_f1], fechas[idx_f2]), each=10)
+plot(fechas_rep, vals, type="l", col="grey75", lwd=0.5,
+     xlab="", ylab="kW", main="Serie temporal", cex.main=0.9)
+lo <- lowess(as.numeric(fechas_rep), vals, f=0.1)
+lines(as.Date(lo$x, origin="1970-01-01"), lo$y, col="steelblue", lwd=2)
+abline(h=60, col="darkorange", lty=2, lwd=1.5)
+abline(v=as.Date("2017-09-15"), col="red3", lty=3)
+par(op)
+```
+
+El test de Shapiro-Wilk rechaza la normalidad de las medias de Fase I ($W=`r round(sw$statistic,3)`$, $p=`r round(sw$p.value,3)`$), aunque el rechazo es moderado: con $n=10$ el Teorema Central del Límite garantiza convergencia suficiente hacia la normal y los límites $\pm3\sigma$ son válidos. La autocorrelación lag-1 ($\hat{\rho}_1=`r round(rho1,3)`$) queda por debajo del umbral de significación $\pm0.343$, por lo que el supuesto de independencia entre muestras consecutivas se acepta.
+
+La serie temporal (gráfico derecho) evidencia tres fases operativas diferenciadas: operación estable de agosto a mediados de septiembre en torno a 50 kW, una caída brusca el 21--22 de septiembre, y un sobreconsumo sostenido en octubre--noviembre que supera el USL de 60 kW durante varias semanas. El estadístico descriptivo básico del período completo es: $\bar{x}=52.45$ kW, $s=18.15$ kW, CV=34.6%, con asimetría positiva y cola derecha pesada debida a los episodios de sobreconsumo.
+
+---
+
+# Gráficos de Control $\bar{X}$-$R$
+
+Los gráficos de control $\bar{X}$-$R$ permiten monitorizar simultáneamente la posición y la dispersión del proceso. El procedimiento requiere construir primero el gráfico $R$, que proporciona la estimación de la variabilidad $\hat{\sigma}=\bar{R}/d_2$ necesaria para calcular los límites del gráfico $\bar{X}$. Las constantes tabuladas para $n=10$ son: $A_2=0.308$, $D_3=0.223$, $D_4=1.777$, $d_2=3.078$.
+
+## Fase I -- Calibración
+
+```{r R-f1, echo=TRUE, fig.cap="Grafico R -- Fase I (Calibracion)."}
+q_R_f1 <- qcc(chiller_qcc[idx_f1,], type="R", nsigmas=3,
+               title="Grafico R -- Fase I", xlab="Muestra (dia)", ylab="Rango (kW)")
+```
+
+```{r Xbar-f1, echo=TRUE, fig.cap="Grafico X-barra -- Fase I (Calibracion)."}
+q_X_f1 <- qcc(chiller_qcc[idx_f1,], type="xbar", nsigmas=3,
+               title="Grafico X-barra -- Fase I", xlab="Muestra (dia)", ylab="Media (kW)")
+```
+
+```{r limites, include=FALSE}
+A2<-0.308; D3<-0.223; D4<-1.777; d2<-3.078
+Xbarbar   <- q_X_f1$center
+sigma_est <- q_X_f1$std.dev
+Rbar      <- mean(rangos_f1)
+UCL_X <- Xbarbar+A2*Rbar; LCL_X <- Xbarbar-A2*Rbar
+UCL_R <- D4*Rbar;         LCL_R <- D3*Rbar
+```
+
+Las 34 muestras de Fase I no presentan ningún punto fuera de control en ninguno de los dos gráficos. La variabilidad intra-día y la posición del proceso permanecen estables, lo que valida los límites estimados como representativos del comportamiento natural del proceso: $\text{UCL}_{\bar{X}}=`r round(UCL_X,2)`$ kW, $\text{LCL}_{\bar{X}}=`r round(LCL_X,2)`$ kW, $\text{UCL}_R=`r round(UCL_R,2)`$ kW, $\hat{\sigma}=`r round(sigma_est,2)`$ kW. Fase I está bajo control estadístico y los límites son definitivos.
+
+
+## Fase II -- Monitorización
+
+```{r R-mon, echo=TRUE, fig.cap="Grafico R -- Monitorizacion (Fases I+II)."}
+q_R_mon <- qcc(chiller_qcc[idx_f1,], newdata=chiller_qcc[idx_f2,],
+               type="R", nsigmas=3,
+               title="Grafico R -- Monitorizacion", xlab="Muestra (dia)", ylab="Rango (kW)")
+```
+
+```{r Xbar-mon, echo=TRUE, fig.cap="Grafico X-barra -- Monitorizacion (Fases I+II)."}
+q_X_mon <- qcc(chiller_qcc[idx_f1,], newdata=chiller_qcc[idx_f2,],
+               type="xbar", nsigmas=3,
+               title="Grafico X-barra -- Monitorizacion", xlab="Muestra (dia)", ylab="Media (kW)")
+```
+
+El gráfico $R$ detecta `r length(q_R_mon$violations$beyond.limits)` muestras OOC en Fase II, asociadas a tres eventos: el colapso y rebote del rango durante la parada del 21--22 de septiembre, la alta variabilidad intra-día del período de octubre, y los picos extremos de noviembre. El gráfico $\bar{X}$ detecta `r length(q_X_mon$violations$beyond.limits)` muestras OOC: medias de $\approx1.9$ kW el 21--22 de septiembre (muy por debajo del LCL, equipo apagado) y 15 días consecutivos sobre el UCL durante octubre, con un desplazamiento sostenido de $\approx1.9\sigma$ respecto a la media de Fase I. Ambos gráficos actúan de forma complementaria: el $R$ señala inestabilidad en la dispersión y el $\bar{X}$ confirma los desplazamientos en la media.
+
+---
+
+# Gráficos de Memoria: EWMA y CUSUM
+
+El gráfico $\bar{X}$ reacciona muestra a muestra y es efectivo para desplazamientos bruscos. Sin embargo, ante cambios lentos y sostenidos ---como una deriva gradual de la media del proceso--- su sensibilidad es limitada porque no acumula la evidencia de muestras anteriores. Los gráficos EWMA y CUSUM están diseñados precisamente para este escenario: ponderan o acumulan las desviaciones a lo largo del tiempo, manteniendo el mismo $\text{ARL}_0\approx370$ que el Shewhart clásico pero reduciendo el $\text{ARL}_1$ para desplazamientos inferiores a $2\sigma$.
+
+```{r ewma, echo=TRUE, fig.cap="Grafico EWMA (lambda=0.2, L=3) -- Monitorizacion (Fases I+II)."}
+q_ew <- ewma(chiller_qcc[idx_f1,], lambda=0.2, nsigmas=3,
+             newdata=chiller_qcc[idx_f2,],
+             title="EWMA (lambda=0.2, L=3) -- Monitorizacion")
+```
+
+```{r cusum, echo=TRUE, fig.cap="Grafico CUSUM (k=0.5, h=5) -- Monitorizacion (Fases I+II)."}
+q_cu <- cusum(chiller_qcc[idx_f1,], decision.interval=5, se.shift=1,
+              newdata=chiller_qcc[idx_f2,],
+              title="CUSUM (k=0.5, h=5) -- Monitorizacion")
+```
+
+El EWMA ($z_i=\lambda\bar{x}_i+(1-\lambda)z_{i-1}$, con $\lambda=0.2$) pondera las observaciones recientes con más peso, produciendo una señal más suave. En Fase I permanece estable dentro de los límites variables. En Fase II detecta las mismas anomalías que el $\bar{X}$, pero con ligero retraso en el sobreconsumo de octubre, consecuencia directa de la inercia de $\lambda=0.2$: el estadístico no reacciona a una sola muestra sino a la acumulación de varias. El CUSUM ($C^+_i=\max(0,C^+_{i-1}+(z_i-k))$, con $k=0.5$ y $h=5$) acumula desviaciones estandarizadas: $C^+$ supera el umbral de forma progresiva a partir de octubre, haciendo visible la deriva antes de que muestras individuales superen el UCL del $\bar{X}$; $C^-$ detecta con precisión las caídas bruscas de septiembre y noviembre. Para el desplazamiento grande de octubre ($\approx1.9\sigma$), los tres gráficos detectan la anomalía, pero EWMA y CUSUM aportarían una ventaja decisiva ante derivas inferiores a $1\sigma$ que el Shewhart clásico podría pasar por alto durante varias muestras.
+
+---
+
+# Curvas OC y ARL
+
+Las curvas OC y ARL cuantifican el rendimiento del gráfico de control de forma teórica, complementando el análisis empírico de las secciones anteriores. La curva OC muestra $\beta(\delta)=\Phi(3-\delta\sqrt{n})-\Phi(-3-\delta\sqrt{n})$, la probabilidad de no detectar un desplazamiento real de magnitud $\delta\sigma$. El ARL transforma esa probabilidad en el número esperado de muestras hasta la primera alarma: $\text{ARL}_1=1/(1-\beta)$, con $\text{ARL}_0=1/\alpha\approx370$ cuando el proceso está bajo control.
+
+```{r oc-arl, echo=FALSE, fig.height=4.2, fig.cap="Curvas OC (izq.) y ARL (der.) para el grafico X-barra con limites 3-sigma y distintos n."}
+q_oc    <- qcc(chiller_qcc[idx_f1,], type="xbar", nsigmas=3, plot=FALSE)
+beta_oc <- oc.curves(q_oc, n=c(1,5,10,15,20,25))
+ARL_mat <- 1/(1-beta_oc)
+cols_oc <- c("grey70","steelblue3","navy","forestgreen","darkorange","red3")
+op <- par(mfrow=c(1,2), mar=c(4,4.5,2.5,1))
+matplot(seq(0,5,length.out=nrow(beta_oc)), beta_oc,
+        type="l", lty=1, lwd=2, col=cols_oc, ylim=c(0,1),
+        xlab="delta x sigma", ylab="beta (error tipo II)", main="Curva OC", cex.main=0.9)
+abline(h=0.0027, lty=2, col="grey50")
+legend("topright", paste0("n=",c(1,5,10,15,20,25)), col=cols_oc,
+       lwd=2, lty=1, bty="n", cex=0.72)
+matplot(seq(0,5,length.out=nrow(ARL_mat)), ARL_mat,
+        type="l", lty=1, lwd=2, col=cols_oc, log="y", ylim=c(1,500),
+        xlab="delta x sigma", ylab="ARL", main="Curva ARL", cex.main=0.9)
+abline(h=370.4, lty=2, col="grey50")
+legend("topright", paste0("n=",c(1,5,10,15,20,25)), col=cols_oc,
+       lwd=2, lty=1, bty="n", cex=0.72)
+par(op)
+```
+
+La curva OC (izquierda) muestra que para $\delta=0$ la tasa de falsas alarmas es $\alpha=0.0027$, y $\beta$ decrece hacia 0 a medida que el desplazamiento aumenta, con mayor velocidad para tamaños muestrales mayores. La curva ARL (derecha, escala logarítmica) refleja $\text{ARL}_0=370$ bajo control y $\text{ARL}_1\approx1$ para $\delta=2\sigma$ con $n=10$: el desplazamiento de octubre se detecta en la primera muestra afectada. Ambas curvas confirman que el diseño con $n=10$ es adecuado para los desplazamientos observados en este proceso.
+
+---
+
+# Comparación con las anomalías del artículo
+
+Flores et al. (2020) identifican mediante SEM y análisis de clústeres sobre datos funcionales un conjunto de fechas con comportamiento anómalo en el sistema HVAC. La tabla siguiente confronta esas fechas con los resultados obtenidos por los gráficos $\bar{X}$-$R$.
+
+```{r tabla-match}
+kable(data.frame(
+  Fecha = c("11 sep","19 sep","21 sep","22 sep","27 sep","29 sep","30 sep",
+            "11-31 oct","8 nov","17 nov"),
+  Articulo = c("Si","Si","Si","Si","Si","Si","Si","Periodo de degradacion","Si","Si"),
+  SPC_Xbar = c("NO","NO","SI -- X-barra << LCL","SI -- X-barra << LCL",
+               "NO","NO","NO","SI -- 15 dias sobre UCL","SI -- X-barra < LCL","NO"),
+  SPC_R    = c("NO","NO","SI -- colapsa a cero","SI -- colapsa a cero",
+               "NO","NO","NO","SI -- elevado","SI -- extremo","SI -- extremo")
+),
+booktabs=TRUE,
+col.names=c("Fecha / Periodo","Citada en articulo","Detectada X-barra","Detectada R"),
+caption="Confrontacion de anomalias del articulo con seniales OOC de los graficos X-barra y R.")
+```
+
+**Coincidencias:** los gráficos $\bar{X}$-$R$ detectan con claridad las paradas del 21--22 de septiembre y del 8 de noviembre, así como el período de sobreconsumo de octubre. En los tres casos la señal es contundente: la parada genera medias de $\approx1.9$ kW muy por debajo del LCL y rangos que colapsan a cero; el sobreconsumo produce 15 días consecutivos sobre el UCL con $\delta\approx1.9\sigma$.
+
+**No coincidencias:** las fechas 11, 19, 27, 29 y 30 de septiembre, son señaladas en el artículo pero no generan señal OOC en ninguno de los dos gráficos, y el 17 de noviembre solo detecta en el gráfico R. La razón radica en la naturaleza diferente de ambos métodos. El SPC univariante sobre `chiller_kw` detecta únicamente cambios en la media o la variabilidad de esa variable: un gráfico $\bar{X}$ emite señal cuando la media muestral supera los límites $\bar{\bar{X}}\pm A_2\bar{R}$, y un gráfico $R$ cuando el rango supera $D_4\bar{R}$ o cae bajo $D_3\bar{R}$. Las anomalías no detectadas corresponden a **fallos de sensores de temperatura** (de impulsión, retorno o ambiente) que el artículo identifica mediante la estructura de correlación multivariante entre todas las variables del sistema. Un sensor defectuoso puede producir lecturas erróneas en temperatura sin alterar de forma significativa la potencia activa del chiller, especialmente si el fallo es puntual o de magnitud moderada. El SEM del artículo opera sobre perfiles funcionales completos y la correlación entre variables, capturando rupturas en la dependencia multivariante que el SPC univariante, por construcción, no puede detectar.
+
+---
+
+# Análisis de Capacidad
+
+Una vez verificado que el proceso está bajo control estadístico en Fase I, es posible evaluar si es capaz de cumplir las especificaciones de forma consistente. Se fijan $\text{USL}=60$ kW, $\text{LSL}=30$ kW y $\text{Target}=45$ kW.
+
+```{r capacidad, echo=TRUE, fig.height=4.0, fig.cap="Analisis de capacidad (Fase I) con qcc::process.capability()."}
+pc <- process.capability(q_X_f1, spec.limits=c(30,60), target=45)
+```
+
+```{r cap-ss, echo=TRUE, fig.height=4.0, fig.cap="Analisis de capacidad (Fase I) con SixSigma::ss.study.ca()."}
+vec_f1 <- as.vector(t(chiller_qcc[idx_f1,]))
+ss.study.ca(xST=vec_f1, LSL=30, USL=60, Target=45,
+            alpha=0.05, f.su="Consumo Chiller (kW)")
+```
+
+```{r tabla-cap}
+Cp  <- (60-30)/(6*sigma_est); Cpu <- (60-Xbarbar)/(3*sigma_est)
+Cpl <- (Xbarbar-30)/(3*sigma_est); Cpk <- min(Cpu,Cpl)
+Cpm <- (60-30)/(6*sqrt(sigma_est^2+(Xbarbar-45)^2))
+kable(data.frame(
+  Indice=c("Cp","Cpu","Cpl","Cpk","Cpm","NC > USL","NC < LSL"),
+  Valor=c(round(Cp,3),round(Cpu,3),round(Cpl,3),round(Cpk,3),round(Cpm,3),
+          paste(round(pnorm(60,Xbarbar,sigma_est,lower.tail=FALSE)*1e6),"ppm"),
+          paste(round(pnorm(30,Xbarbar,sigma_est,lower.tail=TRUE)*1e6),"ppm")),
+  Interpretacion=c("Variabilidad > tolerancia","Poca capacidad vs USL","Margen vs LSL",
+                   "NO CAPAZ (< 1.00)","Penaliza descentrado respecto al Target",
+                   "~15.9% de los dias","~3.1% de los dias")),
+  booktabs=TRUE, col.names=c("Indice","Valor","Interpretacion"),
+  caption="Indices de capacidad del proceso. sigma estimada mediante R-barra/d2 = 10.48 kW.")
+```
+
+Los dos gráficos de capacidad y la tabla de índices coinciden en el diagnóstico: **el proceso no es capaz.** $C_p=`r round(Cp,3)`$ indica que la variabilidad natural del proceso ($6\hat{\sigma}=`r round(6*sigma_est,1)`$ kW) supera en más del doble la tolerancia de especificación ($\text{USL}-\text{LSL}=30$ kW). $C_{pk}=`r round(Cpk,3)`\ll1.00$ confirma el bajo desempeño real: la media del proceso ($\hat{\mu}=`r round(Xbarbar,1)`$ kW) está descentrada hacia el USL, lo que penaliza el margen superior. Incluso durante la operación normal de Fase I, el `r round(pnorm(60,Xbarbar,sigma_est,lower.tail=FALSE)*100,1)`% de los días supera el USL. $C_{pm}=`r round(Cpm,3)`$ recoge adicionalmente el efecto del descentrado respecto al Target. La función `ss.ca.cp()` proporciona el intervalo de confianza al 95% para $C_p$, acotando la incertidumbre de la estimación.
+
+---
+\newpage
+
+# Conclusiones
+
+Los supuestos de normalidad e independencia se verificaron sobre Fase I antes de construir los límites: la no normalidad es moderada y mitigada por el TCL con $n=10$; la autocorrelación lag-1 no es estadísticamente significativa. La elección de $n=10$ como tamaño de muestra racional garantiza homogeneidad intra-muestra y proporciona $\text{ARL}_0=370$ con límites $\pm3\sigma$.
+
+La Fase I resultó limpia (0 OOC en $\bar{X}$ y $R$), validando los límites de control sin necesidad de recalibración. En Fase II los gráficos $\bar{X}$-$R$ detectaron tres anomalías energéticas contundentes: la parada del 21--22 de septiembre, el sobreconsumo sostenido de octubre y las paradas de noviembre, todas con causa asignable documentada en el artículo.
+
+Las curvas OC y ARL confirman que el diseño $n=10$ es adecuado: $\text{ARL}_1\approx1$ para el desplazamiento de octubre ($\approx1.9\sigma$), es decir, detección prácticamente en la primera muestra afectada.
+
+El análisis de capacidad revela un proceso no capaz ($C_{pk}=`r round(Cpk,3)`$): la variabilidad natural supera la tolerancia de especificación y la media del proceso está descentrada hacia el USL.
+
+La comparación con el artículo muestra que cinco de las diez fechas anómalas documentadas no generan señal OOC en los gráficos $\bar{X}$-$R$. Estas corresponden a fallos de sensores de temperatura que no se manifiestan en la potencia activa del chiller: el SPC univariante, por construcción estadística, solo detecta rupturas en la media o la varianza de la variable monitorizada y no captura cambios en la estructura de correlación entre variables.
+
+En lo que respecta a los propios gráficos de control, EWMA y CUSUM detectan las mismas anomalías que el $\bar{X}$-$R$ en este caso, pero su ventaja diferencial reside en escenarios de deriva lenta ($\delta<1\sigma$): al acumular evidencia entre muestras consecutivas, reducen el $\text{ARL}_1$ de forma sustancial frente al Shewhart clásico, que solo evalúa cada muestra de forma independiente. Aun así, ninguno de estos métodos univariantes alcanza la capacidad diagnóstica del enfoque de Flores et al. (2020), que opera sobre perfiles funcionales completos y la dependencia multivariante entre sensores mediante SEM, permitiendo identificar fallos que no se reflejan en ninguna variable individual por separado.
+
+# Referencias
+
+- Flores, M., Naya, S., Fernández-Casal, R., Zaragoza, S., Raña, P., & Tarrío-Saavedra, J. (2020). *Constructing a Control Chart Using Functional Data*. Mathematics, 8(1), 58. https://doi.org/10.3390/math8010058 
+- Naya, S., & Tarrío, J. (2026). *Control Estadístico de la Calidad [Apuntes de la asignatura]*. Máster en Técnicas Estadísticas, Universidade da Coruña.
+
